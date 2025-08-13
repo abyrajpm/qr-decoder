@@ -1,0 +1,7 @@
+{
+  "name": "QR Lab Decoder",
+  "short_name": "QR Decoder",
+  "start_url": "./",
+  "display": "standalone",
+  "icons": []
+}

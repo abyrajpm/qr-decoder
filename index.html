@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>QR Lab Decoder</title>
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;line-height:1.35;background:#fafafa}
+  header{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+  h1{font-size:1.1rem;margin:0}
+  .card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:14px;margin:10px 0}
+  label{font-size:.9rem;color:#333}
+  textarea,input{width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;border:1px solid #ddd;border-radius:10px;padding:10px}
+  button{border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
+  .primary{background:#0a7cff;color:#fff}
+  .row{display:grid;grid-template-columns:140px 1fr;gap:8px;margin:6px 0}
+  .k{color:#555}
+  .v{font-weight:600}
+  .hint{color:#666;font-size:.85rem}
+  .ok{color:#0a7c2f}
+  .bad{color:#b00020}
+  footer{margin-top:20px;color:#777;font-size:.8rem}
+</style>
+</head>
+<body>
+<header>
+  <h1>QR Lab Decoder</h1>
+</header>
+
+<div class="card">
+  <label for="code">Paste short code (or open with <code>?c=...</code>)</label>
+  <textarea id="code" rows="3" placeholder="X1*D250812*MDD879*R10/1*J.1*V.3*H.6*T1500-1510-1520*OG"></textarea>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button class="primary" id="decodeBtn">Decode</button>
+    <button id="exampleBtn">Use Example</button>
+  </div>
+  <div class="hint">Tip: Make your QR point to this page with <code>?c=SHORTCODE</code> so it decodes instantly after scanning.</div>
+</div>
+
+<div id="result" class="card" style="display:none"></div>
+<div id="error" class="card bad" style="display:none"></div>
+
+<footer>
+  Schema: <code>X1</code> · Works offline after first load · No data leaves your phone.
+</footer>
+
+<script>
+// --- parsing helpers ---
+function pad(n){ return n.toString().padStart(2,'0'); }
+function toDate(yyMMdd){
+  if(!/^\d{6}$/.test(yyMMdd)) return yyMMdd;
+  const yy = parseInt(yyMMdd.slice(0,2),10);
+  const year = 2000 + yy; // supports 2000–2099; adjust if needed
+  const m = yyMMdd.slice(2,4), d = yyMMdd.slice(4,6);
+  return `${year}-${m}-${d}`;
+}
+function toTime(hhmm){
+  if(!/^\d{3,4}$/.test(hhmm)) return hhmm;
+  const s = hhmm.padStart(4,'0');
+  return `${s.slice(0,2)}:${s.slice(2,4)}`;
+}
+function parseTimes(s){ // "1500-1510-1520" or "1500+10+10"
+  if(s.includes('-')){
+    const [pt,p1,p2] = s.split('-');
+    return { pt: toTime(pt), p1: toTime(p1), p2: toTime(p2) };
+  }
+  if(s.includes('+')){
+    const [base, d1, d2] = s.split('+');
+    const baseStr = base.padStart(4,'0');
+    const baseMin = parseInt(baseStr.slice(0,2),10)*60 + parseInt(baseStr.slice(2,4),10);
+    const p1m = baseMin + parseInt(d1||'0',10);
+    const p2m = baseMin + parseInt(d1||'0',10) + parseInt(d2||'0',10);
+    const toHHMM = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
+    return { pt: toHHMM(baseMin), p1: toHHMM(p1m), p2: toHHMM(p2m) };
+  }
+  return { pt: s, p1: '', p2: '' };
+}
+function obsFull(o){
+  const map = { G:'Good', B:'Bad', U:'Unknown' };
+  return map[o?.toUpperCase?.()] || o;
+}
+
+// --- core parser for "X1*D250812*MDD879*R10/1*J.1*V.3*H.6*T1500-1510-1520*OG" ---
+function parseShortCode(input){
+  if(!input || typeof input !== 'string') throw new Error('Empty input.');
+  const raw = input.trim();
+  const code = raw.replace(/\s+/g,''); // tolerate spaces/newlines from some scanners
+  const parts = code.split('*');
+  if(parts.length < 2) throw new Error('Expected fields separated by *');
+  const ver = parts[0];
+  if(!/^X\d+$/i.test(ver)) throw new Error('Missing/invalid version (e.g., X1).');
+
+  const data = { version: ver.toUpperCase() };
+  for(let i=1;i<parts.length;i++){
+    const p = parts[i];
+    // key is leading letters, value is the rest
+    const m = p.match(/^([A-Za-z]+)(.*)$/);
+    if(!m) continue;
+    const key = m[1].toUpperCase();
+    const val = m[2];
+
+    switch(key){
+      case 'D': data.date = toDate(val); break;            // YYMMDD
+      case 'M': data.material = val.replace(/(.{2})(\d{3})$/,'$1-$2'); break; // DD879->DD-879
+      case 'R': data.mix = val.replace('/',':'); break;    // 10/1->10:1
+      case 'J': data.sJ = val; break;                      // grams
+      case 'V': data.tv = val; break;                      // grams
+      case 'H': data.th = val; break;                      // grams
+      case 'T': Object.assign(data, parseTimes(val)); break;
+      case 'O': data.observation = obsFull(val); break;
+      default:
+        // Unknown keys preserved for forward-compat
+        data['_' + key] = val;
+    }
+  }
+  return data;
+}
+
+// --- render ---
+function render(data){
+  const el = document.getElementById('result');
+  const row = (k,v) => v ? `<div class="row"><div class="k">${k}</div><div class="v">${v}</div></div>` : '';
+  el.innerHTML = [
+    row('Schema', data.version || ''),
+    row('Date', data.date || ''),
+    row('Material', data.material || ''),
+    row('Mix', data.mix || ''),
+    row('sJ (g)', data.sJ || ''),
+    row('tv (g)', data.tv || ''),
+    row('th (g)', data.th || ''),
+    row('Prep time (pt)', data.pt || ''),
+    row('Sample 1 (p1)', data.p1 || ''),
+    row('Sample 2 (p2)', data.p2 || ''),
+    row('Observation', data.observation || '')
+  ].join('');
+  el.style.display = 'block';
+  document.getElementById('error').style.display = 'none';
+}
+function showError(msg){
+  const e = document.getElementById('error');
+  e.textContent = msg;
+  e.style.display = 'block';
+  document.getElementById('result').style.display = 'none';
+}
+
+// --- wire up ---
+document.getElementById('decodeBtn').addEventListener('click', ()=>{
+  try{
+    const text = document.getElementById('code').value;
+    render(parseShortCode(text));
+  }catch(err){ showError(err.message); }
+});
+document.getElementById('exampleBtn').addEventListener('click', ()=>{
+  const ex = 'X1*D250812*MDD879*R10/1*J.1*V.3*H.6*T1500-1510-1520*OG';
+  document.getElementById('code').value = ex;
+  document.getElementById('decodeBtn').click();
+});
+
+// Auto-decode if provided as ?c=... or #c=...
+(function auto(){
+  const url = new URL(window.location);
+  const q = url.searchParams.get('c') || (location.hash.startsWith('#') ? decodeURIComponent(location.hash.slice(1)) : '');
+  if(q){
+    document.getElementById('code').value = q;
+    document.getElementById('decodeBtn').click();
+  }
+})();
+
+// Simple offline support
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=> navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+}
+</script>
+</body>
+</html>
