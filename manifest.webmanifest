@@ -1,7 +1,12 @@
-{
-  "name": "QR Lab Decoder",
-  "short_name": "QR Decoder",
-  "start_url": "./",
-  "display": "standalone",
-  "icons": []
-}
+json.dumps({
+    "name": "QR Lab Decoder (Protected)",
+    "short_name": "QR Decoder",
+    "start_url": ".",
+    "display": "standalone",
+    "background_color": "#fafafa",
+    "theme_color": "#0a7cff",
+    "icons": []
+}, indent=2)
+
+# Example password "lab123" hashed with SHA-256 (base64url)
+example_hash = b64u(hashlib.sha256(b"lab123").digest())
