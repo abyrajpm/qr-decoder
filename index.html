@@ -1,26 +1,35 @@
-<!doctype html>
+# Create an updated, password-gated version of the QR Lab Decoder with a config.json.
+from pathlib import Path
+import json, zipfile
+
+base = Path("/mnt/data/qr-lab-decoder-pass")
+base.mkdir(exist_ok=True)
+
+index_content = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>QR Lab Decoder</title>
+<title>QR Lab Decoder (Protected)</title>
 <link rel="manifest" href="manifest.webmanifest">
 <style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;line-height:1.35;background:#fafafa}
+  :root{--bg:#fafafa;--card:#fff;--text:#222;--muted:#666;--brand:#0a7cff;--bad:#b00020}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;line-height:1.35;background:var(--bg);color:var(--text)}
   header{display:flex;gap:8px;align-items:center;margin-bottom:12px}
   h1{font-size:1.1rem;margin:0}
-  .card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:14px;margin:10px 0}
+  .card{background:var(--card);border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:14px;margin:10px 0}
   label{font-size:.9rem;color:#333}
   textarea,input{width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;border:1px solid #ddd;border-radius:10px;padding:10px}
   button{border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
-  .primary{background:#0a7cff;color:#fff}
+  .primary{background:var(--brand);color:#fff}
   .row{display:grid;grid-template-columns:140px 1fr;gap:8px;margin:6px 0}
   .k{color:#555}
   .v{font-weight:600}
-  .hint{color:#666;font-size:.85rem}
-  .ok{color:#0a7c2f}
-  .bad{color:#b00020}
+  .hint{color:var(--muted);font-size:.85rem}
+  .bad{color:var(--bad)}
   footer{margin-top:20px;color:#777;font-size:.8rem}
+  .hidden{display:none}
 </style>
 </head>
 <body>
@@ -28,99 +37,163 @@
   <h1>QR Lab Decoder</h1>
 </header>
 
-<div class="card">
-  <label for="code">Paste short code (or open with <code>?c=...</code>)</label>
-  <textarea id="code" rows="3" placeholder="X1*D250812*MDD879*R10/1*J.1*V.3*H.6*T1500-1510-1520*OG"></textarea>
-  <div style="display:flex;gap:8px;margin-top:8px">
-    <button class="primary" id="decodeBtn">Decode</button>
-    <button id="exampleBtn">Use Example</button>
+<!-- AUTH GATE -->
+<div id="auth" class="card">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+    <div>
+      <div style="font-weight:600">Enter passphrase</div>
+      <div class="hint">Required before decoding. <span id="hint"></span></div>
+    </div>
   </div>
-  <div class="hint">Tip: Make your QR point to this page with <code>?c=SHORTCODE</code> so it decodes instantly after scanning.</div>
+  <div style="display:flex;gap:8px;margin-top:10px">
+    <input id="pass" type="password" placeholder="••••••••" autocomplete="current-password" />
+    <button class="primary" id="unlockBtn">Unlock</button>
+  </div>
+  <div id="authErr" class="bad" style="margin-top:8px;display:none"></div>
 </div>
 
-<div id="result" class="card" style="display:none"></div>
-<div id="error" class="card bad" style="display:none"></div>
+<!-- DECODER UI -->
+<div id="ui" class="hidden">
+  <div class="card">
+    <label for="code">Paste short code (or open with <code>?c=...</code>)</label>
+    <textarea id="code" rows="3" placeholder="X1*D250812*M1*R10/1*J0.1*TV0.4*T1500-1510-1520*OG"></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="primary" id="decodeBtn">Decode</button>
+      <button id="exampleBtn">Use Example</button>
+      <button id="lockBtn" title="Lock and clear session">Lock</button>
+    </div>
+    <div class="hint">Tip: Make your QR point to this page with <code>?c=SHORTCODE</code>. Use <code>?pass=...</code> to prefill passphrase.</div>
+  </div>
+
+  <div id="result" class="card" style="display:none"></div>
+  <div id="error" class="card bad" style="display:none"></div>
+</div>
 
 <footer>
   Schema: <code>X1</code> · Works offline after first load · No data leaves your phone.
 </footer>
 
 <script>
-// --- parsing helpers ---
+// ---------- CONFIG LOADING ----------
+const DEFAULT_CONFIG = {
+  version: 1,
+  materials: {},
+  fields: {},
+  observationMap: { G:'Good', B:'Bad', U:'Unknown' },
+  date: { centuryBase: 2000 },
+  formatting: { materialHyphenateLast3: true },
+  auth: {
+    // SHA-256 hashes of allowed passphrases (base64url). Replace in config.json.
+    passwordHashes: [],
+    hint: ''
+  }
+};
+
+async function loadConfig(){
+  const url = new URL(location.href);
+  const confURL = url.searchParams.get('conf') || 'config.json';
+  const cacheKey = 'qrconf::' + confURL;
+  try{
+    const resp = await fetch(confURL, { cache: 'no-cache' });
+    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+    const fresh = await resp.json();
+    localStorage.setItem(cacheKey, JSON.stringify(fresh));
+    return { ...DEFAULT_CONFIG, ...fresh };
+  }catch(e){
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) return { ...DEFAULT_CONFIG, ...JSON.parse(cached) };
+    return DEFAULT_CONFIG;
+  }
+}
+
+// ---------- UTILS ----------
 function pad(n){ return n.toString().padStart(2,'0'); }
-function toDate(yyMMdd){
-  if(!/^\d{6}$/.test(yyMMdd)) return yyMMdd;
+function toDate(yyMMdd, base){
+  if(!/^\\d{6}$/.test(yyMMdd)) return yyMMdd;
   const yy = parseInt(yyMMdd.slice(0,2),10);
-  const year = 2000 + yy; // supports 2000–2099; adjust if needed
+  const year = (base || 2000) + yy;
   const m = yyMMdd.slice(2,4), d = yyMMdd.slice(4,6);
   return `${year}-${m}-${d}`;
 }
 function toTime(hhmm){
-  if(!/^\d{3,4}$/.test(hhmm)) return hhmm;
+  if(!/^\\d{3,4}$/.test(hhmm)) return hhmm;
   const s = hhmm.padStart(4,'0');
   return `${s.slice(0,2)}:${s.slice(2,4)}`;
 }
-function parseTimes(s){ // "1500-1510-1520" or "1500+10+10"
+function parseTimes(s){
   if(s.includes('-')){
     const [pt,p1,p2] = s.split('-');
     return { pt: toTime(pt), p1: toTime(p1), p2: toTime(p2) };
   }
   if(s.includes('+')){
     const [base, d1, d2] = s.split('+');
-    const baseStr = base.padStart(4,'0');
-    const baseMin = parseInt(baseStr.slice(0,2),10)*60 + parseInt(baseStr.slice(2,4),10);
+    const b = base.padStart(4,'0');
+    const baseMin = parseInt(b.slice(0,2),10)*60 + parseInt(b.slice(2,4),10);
     const p1m = baseMin + parseInt(d1||'0',10);
-    const p2m = baseMin + parseInt(d1||'0',10) + parseInt(d2||'0',10);
+    const p2m = p1m + parseInt(d2||'0',10);
     const toHHMM = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
     return { pt: toHHMM(baseMin), p1: toHHMM(p1m), p2: toHHMM(p2m) };
   }
   return { pt: s, p1: '', p2: '' };
 }
-function obsFull(o){
-  const map = { G:'Good', B:'Bad', U:'Unknown' };
-  return map[o?.toUpperCase?.()] || o;
+function obsFull(o, map){ return map[o?.toUpperCase?.()] || o; }
+
+// WebCrypto helpers
+function b64uToBytes(s){
+  s = s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length % 4) s += '=';
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+function bytesToB64u(bytes){
+  const bin = String.fromCharCode(...new Uint8Array(bytes));
+  return btoa(bin).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+}
+async function sha256B64u(text){
+  const buf = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return bytesToB64u(digest);
 }
 
-// --- core parser for "X1*D250812*MDD879*R10/1*J.1*V.3*H.6*T1500-1510-1520*OG" ---
-function parseShortCode(input){
+// ---------- PARSER (same as before, minimal) ----------
+function parseShortCode(input, cfg){
   if(!input || typeof input !== 'string') throw new Error('Empty input.');
   const raw = input.trim();
-  const code = raw.replace(/\s+/g,''); // tolerate spaces/newlines from some scanners
+  const code = raw.replace(/\\s+/g,''); // tolerate spaces/newlines
   const parts = code.split('*');
   if(parts.length < 2) throw new Error('Expected fields separated by *');
   const ver = parts[0];
-  if(!/^X\d+$/i.test(ver)) throw new Error('Missing/invalid version (e.g., X1).');
+  if(!/^X\\d+$/i.test(ver)) throw new Error('Missing/invalid version (e.g., X1).');
 
   const data = { version: ver.toUpperCase() };
   for(let i=1;i<parts.length;i++){
     const p = parts[i];
-    // key is leading letters, value is the rest
     const m = p.match(/^([A-Za-z]+)(.*)$/);
     if(!m) continue;
     const key = m[1].toUpperCase();
     const val = m[2];
 
     switch(key){
-      case 'D': data.date = toDate(val); break;            // YYMMDD
-      case 'M': data.material = val.replace(/(.{2})(\d{3})$/,'$1-$2'); break; // DD879->DD-879
-      case 'R': data.mix = val.replace('/',':'); break;    // 10/1->10:1
-      case 'J': data.sJ = val; break;                      // grams
-      case 'V': data.tv = val; break;                      // grams
-      case 'H': data.th = val; break;                      // grams
+      case 'D': data.date = toDate(val, cfg.date?.centuryBase || 2000); break;
+      case 'M':
+        const labeled = cfg.materials['M'+val] || cfg.materials[val];
+        data.material = labeled || (cfg.formatting?.materialHyphenateLast3 ? val.replace(/(.{2})(\\d{3})$/,'$1-$2') : val);
+        break;
+      case 'R': data.mix = val.replace('/',':'); break;
+      case 'J': data.sJ = val; break;
+      case 'V': data.tv = val; break;
+      case 'H': data.th = val; break;
       case 'T': Object.assign(data, parseTimes(val)); break;
-      case 'O': data.observation = obsFull(val); break;
+      case 'O': data.observation = obsFull(val, cfg.observationMap || {}); break;
       default:
-        // Unknown keys preserved for forward-compat
         data['_' + key] = val;
     }
   }
   return data;
 }
 
-// --- render ---
+// ---------- RENDER ----------
 function render(data){
   const el = document.getElementById('result');
-  const row = (k,v) => v ? `<div class="row"><div class="k">${k}</div><div class="v">${v}</div></div>` : '';
+  const row = (k,v) => v ? `<div class=\\"row\\"><div class=\\"k\\">${k}</div><div class=\\"v\\">${v}</div></div>` : '';
   el.innerHTML = [
     row('Schema', data.version || ''),
     row('Date', data.date || ''),
@@ -144,33 +217,138 @@ function showError(msg){
   document.getElementById('result').style.display = 'none';
 }
 
-// --- wire up ---
+// ---------- AUTH ----------
+let CFG = DEFAULT_CONFIG;
+
+async function unlock(){
+  const pass = document.getElementById('pass').value;
+  const err = document.getElementById('authErr');
+  err.style.display = 'none';
+  const hash = await sha256B64u(pass);
+  const allowed = (CFG.auth?.passwordHashes || []);
+  if(allowed.includes(hash)){
+    sessionStorage.setItem('qr.unlocked','1');
+    document.getElementById('auth').classList.add('hidden');
+    document.getElementById('ui').classList.remove('hidden');
+    decodeMaybe();
+  }else{
+    err.textContent = 'Incorrect passphrase';
+    err.style.display = 'block';
+  }
+}
+function lock(){
+  sessionStorage.removeItem('qr.unlocked');
+  document.getElementById('ui').classList.add('hidden');
+  document.getElementById('auth').classList.remove('hidden');
+}
+
+// ---------- BOOT / WIRING ----------
+function decodeMaybe(){
+  try{
+    const text = document.getElementById('code').value;
+    if(text) render(parseShortCode(text, CFG));
+  }catch(err){ showError(err.message); }
+}
+
+document.getElementById('unlockBtn').addEventListener('click', unlock);
+document.getElementById('lockBtn')?.addEventListener('click', lock);
+
 document.getElementById('decodeBtn').addEventListener('click', ()=>{
   try{
     const text = document.getElementById('code').value;
-    render(parseShortCode(text));
+    render(parseShortCode(text, CFG));
   }catch(err){ showError(err.message); }
 });
 document.getElementById('exampleBtn').addEventListener('click', ()=>{
-  const ex = 'X1*D250812*MDD879*R10/1*J.1*V.3*H.6*T1500-1510-1520*OG';
+  const ex = 'X1*D250812*M1*R10/1*J0.1*TV0.4*T1500-1510-1520*OG';
   document.getElementById('code').value = ex;
   document.getElementById('decodeBtn').click();
 });
 
-// Auto-decode if provided as ?c=... or #c=...
-(function auto(){
-  const url = new URL(window.location);
-  const q = url.searchParams.get('c') || (location.hash.startsWith('#') ? decodeURIComponent(location.hash.slice(1)) : '');
-  if(q){
-    document.getElementById('code').value = q;
-    document.getElementById('decodeBtn').click();
+(async function init(){
+  CFG = await loadConfig();
+  document.getElementById('hint').textContent = CFG.auth?.hint || '';
+  // Prefill passphrase via ?pass= for convenience (still hashed client-side)
+  const u = new URL(location.href);
+  const pass = u.searchParams.get('pass') || '';
+  if(pass) document.getElementById('pass').value = pass;
+
+  if(sessionStorage.getItem('qr.unlocked') === '1'){
+    document.getElementById('auth').classList.add('hidden');
+    document.getElementById('ui').classList.remove('hidden');
   }
+  // Auto-decode if provided as ?c=... after unlock
+  const q = u.searchParams.get('c') || (location.hash.startsWith('#') ? decodeURIComponent(location.hash.slice(1)) : '');
+  if(q) document.getElementById('code').value = q;
+  if(sessionStorage.getItem('qr.unlocked') === '1'){ decodeMaybe(); }
 })();
 
-// Simple offline support
+// Service worker
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=> navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 }
 </script>
 </body>
 </html>
+"""
+
+sw_content = """const ASSETS = ['.', './index.html', './manifest.webmanifest', './config.json'];
+self.addEventListener('install', e=>{
+  e.waitUntil(caches.open('qr-decoder-v3').then(c=>c.addAll(ASSETS)));
+});
+self.addEventListener('fetch', e=>{
+  e.respondWith(caches.match(e.request).then(r=> r || fetch(e.request)));
+});
+"""
+
+manifest_content = json.dumps({
+    "name": "QR Lab Decoder (Protected)",
+    "short_name": "QR Decoder",
+    "start_url": ".",
+    "display": "standalone",
+    "background_color": "#fafafa",
+    "theme_color": "#0a7cff",
+    "icons": []
+}, indent=2)
+
+# Default config with an example password "lab123" (we store only its SHA-256 base64url hash)
+# hash computed here to avoid exposing plaintext. You should replace this with your own.
+import hashlib, base64
+def b64u(b): 
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+example_hash = b64u(hashlib.sha256(b"lab123").digest())
+
+config_content = json.dumps({
+    "version": 1,
+    "materials": {
+        "M1": "Epoxy Milk 220",
+        "M2": "Plasticiser 110"
+    },
+    "fields": {
+        "J": {"label": "Additive", "unit": "g", "scale": 1},
+        "TV": {"label": "Additive", "unit": "g", "scale": 1}
+    },
+    "observationMap": {"G": "Good", "B": "Bad", "U": "Unknown"},
+    "date": {"centuryBase": 2000},
+    "formatting": {"materialHyphenateLast3": True},
+    "auth": {
+        "passwordHashes": [ example_hash ],
+        "hint": "Ask lab lead for passphrase"
+    }
+}, indent=2)
+
+# Write files
+(base / "index.html").write_text(index_content, encoding="utf-8")
+(base / "sw.js").write_text(sw_content, encoding="utf-8")
+(base / "manifest.webmanifest").write_text(manifest_content, encoding="utf-8")
+(base / "config.json").write_text(config_content, encoding="utf-8")
+
+# Zip it
+zip_path = Path("/mnt/data/qr-lab-decoder-protected.zip")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(base / "index.html", "index.html")
+    z.write(base / "sw.js", "sw.js")
+    z.write(base / "manifest.webmanifest", "manifest.webmanifest")
+    z.write(base / "config.json", "config.json")
+
+print(str(zip_path))
